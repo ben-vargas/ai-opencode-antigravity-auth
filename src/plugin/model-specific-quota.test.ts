@@ -50,17 +50,7 @@ describe("Model-specific Gemini quota", () => {
   });
 
   it("returns null when all header styles are exhausted for the specific model on a single account", () => {
-    // Add a second account
-    const auth2: OAuthAuthDetails = {
-      type: "oauth",
-      refresh: "test-refresh-2",
-      access: "test-access-2",
-      expires: Date.now() + 3600000,
-    };
-    // Manual setup to have multiple accounts
     const manager2 = new AccountManager(auth);
-    // We can't easily add account via public API except via constructor or loading from disk
-    // But we can mock it for this test or just use the manager we have and check if it returns null when all exhausted
     
     const account = manager2.getCurrentAccountForFamily("gemini")!;
     const modelPro = "gemini-1.5-pro";
@@ -69,16 +59,10 @@ describe("Model-specific Gemini quota", () => {
     manager2.markRateLimited(account, 60000, "gemini", "antigravity", modelPro);
     manager2.markRateLimited(account, 60000, "gemini", "gemini-cli", modelPro);
 
-    // For Pro, it should be rate limited for the family (account exhausted for this model)
-    // Wait, I need to check how isRateLimitedForFamily is used
-    // It's used to decide if we should switch account.
+    // No other account available, so returns null for the rate-limited model
+    expect(manager2.getCurrentOrNextForFamily("gemini", modelPro)).toBeNull();
     
-    // In getCurrentOrNextForFamily:
-    // if (!isRateLimitedForFamily(current, family, model)) return current;
-    
-    expect(manager2.getCurrentOrNextForFamily("gemini", modelPro)).toBeNull(); // No other account, so null
-    
-    // But for Flash, it should still return the same account
+    // Flash should still return the same account since it's not rate-limited
     const flashAccount = manager2.getCurrentOrNextForFamily("gemini", modelFlash);
     expect(flashAccount).toBe(account);
   });
