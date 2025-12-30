@@ -18,6 +18,7 @@ export interface RateLimitStateV3 {
   claude?: number;
   "gemini-antigravity"?: number;
   "gemini-cli"?: number;
+  [key: string]: number | undefined;
 }
 
 export interface AccountMetadataV1 {
@@ -96,7 +97,7 @@ export function getStoragePath(): string {
   return join(getConfigDir(), "antigravity-accounts.json");
 }
 
-export function deduplicateAccountsByEmail(accounts: AccountMetadata[]): AccountMetadata[] {
+export function deduplicateAccountsByEmail<T extends { email?: string; lastUsed?: number; addedAt?: number }>(accounts: T[]): T[] {
   const emailToNewestIndex = new Map<string, number>();
   const indicesToKeep = new Set<number>();
   
@@ -127,9 +128,9 @@ export function deduplicateAccountsByEmail(accounts: AccountMetadata[]): Account
     // Prefer higher lastUsed, then higher addedAt
     // Compare fields separately to avoid integer overflow with large timestamps
     const currLastUsed = acc.lastUsed || 0;
-    const existLastUsed = existing.lastUsed || 0;
+    const existLastUsed = (existing as any).lastUsed || 0;
     const currAddedAt = acc.addedAt || 0;
-    const existAddedAt = existing.addedAt || 0;
+    const existAddedAt = (existing as any).addedAt || 0;
 
     const isNewer = currLastUsed > existLastUsed ||
       (currLastUsed === existLastUsed && currAddedAt > existAddedAt);
@@ -145,7 +146,7 @@ export function deduplicateAccountsByEmail(accounts: AccountMetadata[]): Account
   }
   
   // Build the deduplicated list, preserving original order for kept items
-  const result: AccountMetadata[] = [];
+  const result: T[] = [];
   for (let i = 0; i < accounts.length; i++) {
     if (indicesToKeep.has(i)) {
       const acc = accounts[i];
@@ -250,8 +251,8 @@ export async function loadAccounts(): Promise<AccountStorageV3 | null> {
     }
 
     // Validate accounts have required fields
-    const validAccounts = storage.accounts.filter((a): a is AccountMetadata => {
-      return !!a && typeof a === "object" && typeof (a as AccountMetadata).refreshToken === "string";
+    const validAccounts = storage.accounts.filter((a): a is AccountMetadataV3 => {
+      return !!a && typeof a === "object" && typeof (a as AccountMetadataV3).refreshToken === "string";
     });
 
     // Deduplicate accounts by email (keeps newest entry for each email)

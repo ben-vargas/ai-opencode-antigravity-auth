@@ -4,7 +4,8 @@ import type { OAuthAuthDetails, RefreshParts } from "./types";
 
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
 
-export type QuotaKey = "claude" | "gemini-antigravity" | "gemini-cli";
+export type BaseQuotaKey = "claude" | "gemini-antigravity" | "gemini-cli";
+export type QuotaKey = BaseQuotaKey | `${BaseQuotaKey}:${string}`;
 
 export interface ManagedAccount {
   index: number;
@@ -31,11 +32,15 @@ function clampNonNegativeInt(value: unknown, fallback: number): number {
   return value < 0 ? 0 : Math.floor(value);
 }
 
-function getQuotaKey(family: ModelFamily, headerStyle: HeaderStyle): QuotaKey {
+function getQuotaKey(family: ModelFamily, headerStyle: HeaderStyle, model?: string | null): QuotaKey {
   if (family === "claude") {
     return "claude";
   }
-  return headerStyle === "gemini-cli" ? "gemini-cli" : "gemini-antigravity";
+  const base = headerStyle === "gemini-cli" ? "gemini-cli" : "gemini-antigravity";
+  if (model) {
+    return `${base}:${model}`;
+  }
+  return base;
 }
 
 function isRateLimitedForQuotaKey(account: ManagedAccount, key: QuotaKey): boolean {
@@ -43,19 +48,43 @@ function isRateLimitedForQuotaKey(account: ManagedAccount, key: QuotaKey): boole
   return resetTime !== undefined && nowMs() < resetTime;
 }
 
-function isRateLimitedForFamily(account: ManagedAccount, family: ModelFamily): boolean {
+function isRateLimitedForFamily(account: ManagedAccount, family: ModelFamily, model?: string | null): boolean {
   if (family === "claude") {
     return isRateLimitedForQuotaKey(account, "claude");
   }
-  return isRateLimitedForQuotaKey(account, "gemini-antigravity") && 
-         isRateLimitedForQuotaKey(account, "gemini-cli");
+  
+  const antigravityIsLimited = isRateLimitedForHeaderStyle(account, family, "antigravity", model);
+  const cliIsLimited = isRateLimitedForHeaderStyle(account, family, "gemini-cli", model);
+  
+  return antigravityIsLimited && cliIsLimited;
+}
+
+function isRateLimitedForHeaderStyle(account: ManagedAccount, family: ModelFamily, headerStyle: HeaderStyle, model?: string | null): boolean {
+  clearExpiredRateLimits(account);
+  
+  if (family === "claude") {
+    return isRateLimitedForQuotaKey(account, "claude");
+  }
+
+  // Check model-specific quota first if provided
+  if (model) {
+    const modelKey = getQuotaKey(family, headerStyle, model);
+    if (isRateLimitedForQuotaKey(account, modelKey)) {
+      return true;
+    }
+  }
+
+  // Then check base family quota
+  const baseKey = getQuotaKey(family, headerStyle);
+  return isRateLimitedForQuotaKey(account, baseKey);
 }
 
 function clearExpiredRateLimits(account: ManagedAccount): void {
   const now = nowMs();
-  const keys: QuotaKey[] = ["claude", "gemini-antigravity", "gemini-cli"];
+  const keys = Object.keys(account.rateLimitResetTimes) as QuotaKey[];
   for (const key of keys) {
-    if (account.rateLimitResetTimes[key] !== undefined && now >= account.rateLimitResetTimes[key]!) {
+    const resetTime = account.rateLimitResetTimes[key];
+    if (resetTime !== undefined && now >= resetTime) {
       delete account.rateLimitResetTimes[key];
     }
   }
@@ -122,6 +151,8 @@ export class AccountManager {
             expires: matchesFallback ? authFallback?.expires : undefined,
             rateLimitResetTimes: acc.rateLimitResetTimes ?? {},
             lastSwitchReason: acc.lastSwitchReason,
+            coolingDownUntil: acc.coolingDownUntil,
+            cooldownReason: acc.cooldownReason,
           };
         })
         .filter((a): a is ManagedAccount => a !== null);
@@ -200,27 +231,27 @@ export class AccountManager {
     this.lastToastTime = nowMs();
   }
 
-  getCurrentOrNextForFamily(family: ModelFamily): ManagedAccount | null {
+  getCurrentOrNextForFamily(family: ModelFamily, model?: string | null): ManagedAccount | null {
     const current = this.getCurrentAccountForFamily(family);
     if (current) {
       clearExpiredRateLimits(current);
-      if (!isRateLimitedForFamily(current, family) && !this.isAccountCoolingDown(current)) {
+      if (!isRateLimitedForFamily(current, family, model) && !this.isAccountCoolingDown(current)) {
         current.lastUsed = nowMs();
         return current;
       }
     }
 
-    const next = this.getNextForFamily(family);
+    const next = this.getNextForFamily(family, model);
     if (next) {
       this.currentAccountIndexByFamily[family] = next.index;
     }
     return next;
   }
 
-  getNextForFamily(family: ModelFamily): ManagedAccount | null {
+  getNextForFamily(family: ModelFamily, model?: string | null): ManagedAccount | null {
     const available = this.accounts.filter((a) => {
       clearExpiredRateLimits(a);
-      return !isRateLimitedForFamily(a, family) && !this.isAccountCoolingDown(a);
+      return !isRateLimitedForFamily(a, family, model) && !this.isAccountCoolingDown(a);
     });
 
     if (available.length === 0) {
@@ -237,8 +268,14 @@ export class AccountManager {
     return account;
   }
 
-  markRateLimited(account: ManagedAccount, retryAfterMs: number, family: ModelFamily, headerStyle: HeaderStyle = "antigravity"): void {
-    const key = getQuotaKey(family, headerStyle);
+  markRateLimited(
+    account: ManagedAccount,
+    retryAfterMs: number,
+    family: ModelFamily,
+    headerStyle: HeaderStyle = "antigravity",
+    model?: string | null
+  ): void {
+    const key = getQuotaKey(family, headerStyle, model);
     account.rateLimitResetTimes[key] = nowMs() + retryAfterMs;
   }
 
@@ -267,21 +304,24 @@ export class AccountManager {
     return this.isAccountCoolingDown(account) ? account.cooldownReason : undefined;
   }
 
-  isRateLimitedForHeaderStyle(account: ManagedAccount, family: ModelFamily, headerStyle: HeaderStyle): boolean {
-    clearExpiredRateLimits(account);
-    const key = getQuotaKey(family, headerStyle);
-    return isRateLimitedForQuotaKey(account, key);
+  isRateLimitedForHeaderStyle(
+    account: ManagedAccount,
+    family: ModelFamily,
+    headerStyle: HeaderStyle,
+    model?: string | null
+  ): boolean {
+    return isRateLimitedForHeaderStyle(account, family, headerStyle, model);
   }
 
-  getAvailableHeaderStyle(account: ManagedAccount, family: ModelFamily): HeaderStyle | null {
+  getAvailableHeaderStyle(account: ManagedAccount, family: ModelFamily, model?: string | null): HeaderStyle | null {
     clearExpiredRateLimits(account);
     if (family === "claude") {
-      return isRateLimitedForQuotaKey(account, "claude") ? null : "antigravity";
+      return isRateLimitedForHeaderStyle(account, family, "antigravity") ? null : "antigravity";
     }
-    if (!isRateLimitedForQuotaKey(account, "gemini-antigravity")) {
+    if (!isRateLimitedForHeaderStyle(account, family, "antigravity", model)) {
       return "antigravity";
     }
-    if (!isRateLimitedForQuotaKey(account, "gemini-cli")) {
+    if (!isRateLimitedForHeaderStyle(account, family, "gemini-cli", model)) {
       return "gemini-cli";
     }
     return null;
@@ -338,10 +378,10 @@ export class AccountManager {
     };
   }
 
-  getMinWaitTimeForFamily(family: ModelFamily): number {
+  getMinWaitTimeForFamily(family: ModelFamily, model?: string | null): number {
     const available = this.accounts.filter((a) => {
       clearExpiredRateLimits(a);
-      return !isRateLimitedForFamily(a, family);
+      return !isRateLimitedForFamily(a, family, model);
     });
     if (available.length > 0) {
       return 0;
@@ -353,9 +393,13 @@ export class AccountManager {
         const t = a.rateLimitResetTimes.claude;
         if (t !== undefined) waitTimes.push(Math.max(0, t - nowMs()));
       } else {
-        // For Gemini, account becomes available when EITHER pool expires
-        const t1 = a.rateLimitResetTimes["gemini-antigravity"];
-        const t2 = a.rateLimitResetTimes["gemini-cli"];
+        // For Gemini, account becomes available when EITHER pool expires for this model/family
+        const antigravityKey = getQuotaKey(family, "antigravity", model);
+        const cliKey = getQuotaKey(family, "gemini-cli", model);
+
+        const t1 = a.rateLimitResetTimes[antigravityKey];
+        const t2 = a.rateLimitResetTimes[cliKey];
+        
         const accountWait = Math.min(
           t1 !== undefined ? Math.max(0, t1 - nowMs()) : Infinity,
           t2 !== undefined ? Math.max(0, t2 - nowMs()) : Infinity
@@ -386,6 +430,8 @@ export class AccountManager {
         lastUsed: a.lastUsed,
         lastSwitchReason: a.lastSwitchReason,
         rateLimitResetTimes: Object.keys(a.rateLimitResetTimes).length > 0 ? a.rateLimitResetTimes : undefined,
+        coolingDownUntil: a.coolingDownUntil,
+        cooldownReason: a.cooldownReason,
       })),
       activeIndex: claudeIndex,
       activeIndexByFamily: {

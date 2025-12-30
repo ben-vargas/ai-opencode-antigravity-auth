@@ -818,6 +818,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
 
           const urlString = toUrlString(input);
           const family = getModelFamilyFromUrl(urlString);
+          const model = extractModelFromUrl(urlString);
           const debugLines: string[] = [];
           const pushDebug = (line: string) => {
             if (!isDebugEnabled()) return;
@@ -866,6 +867,14 @@ export const createAntigravityPlugin = (providerId: string) => async (
           // This ensures we wait and retry when all accounts are rate-limited
           const quietMode = config.quiet_mode;
           
+          const hasOtherAccountWithAntigravity = (currentAccount: any): boolean => {
+            if (family !== "gemini") return false;
+            const otherAccounts = accountManager.getAccounts().filter(acc => acc.index !== currentAccount.index);
+            return otherAccounts.some(acc => 
+              !accountManager.isRateLimitedForHeaderStyle(acc, family, "antigravity", model)
+            );
+          };
+
           while (true) {
             // Check for abort at the start of each iteration
             checkAborted();
@@ -876,11 +885,12 @@ export const createAntigravityPlugin = (providerId: string) => async (
               throw new Error("No Antigravity accounts available. Run `opencode auth login`.");
             }
 
-            const account = accountManager.getCurrentOrNextForFamily(family);
+            const account = accountManager.getCurrentOrNextForFamily(family, model);
             
             if (!account) {
-              // All accounts are rate-limited
-              const waitMs = accountManager.getMinWaitTimeForFamily(family) || 60_000;
+              // All accounts are rate-limited - wait and retry
+              const waitMs = accountManager.getMinWaitTimeForFamily(family, model) || 60_000;
+              const waitSecValue = Math.max(1, Math.ceil(waitMs / 1000));
 
               pushDebug(`all-rate-limited family=${family} accounts=${accountCount} waitMs=${waitMs}`);
               if (isDebugEnabled()) {
@@ -910,8 +920,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 );
               }
 
-              const waitSec = Math.max(1, Math.ceil(waitMs / 1000));
-              await showToast(`All ${accountCount} account(s) rate-limited for ${family}. Waiting ${waitSec}s...`, "warning");
+              await showToast(`All ${accountCount} account(s) rate-limited for ${family}. Waiting ${waitSecValue}s...`, "warning");
 
               // Wait for the rate-limit cooldown to expire, then retry
               await sleep(waitMs, abortSignal);
@@ -957,6 +966,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   lastError = new Error("Antigravity token refresh failed");
                   if (shouldCooldown) {
                     accountManager.markAccountCoolingDown(account, cooldownMs, "auth-failure");
+                    accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                     pushDebug(`token-refresh-failed: cooldown ${cooldownMs}ms after ${failures} failures`);
                   }
                   continue;
@@ -1004,6 +1014,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 lastError = error instanceof Error ? error : new Error(String(error));
                 if (shouldCooldown) {
                   accountManager.markAccountCoolingDown(account, cooldownMs, "auth-failure");
+                  accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                   pushDebug(`token-refresh-error: cooldown ${cooldownMs}ms after ${failures} failures`);
                 }
                 continue;
@@ -1028,6 +1039,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
               lastError = error instanceof Error ? error : new Error(String(error));
               if (shouldCooldown) {
                 accountManager.markAccountCoolingDown(account, cooldownMs, "project-error");
+                accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                 pushDebug(`project-context-error: cooldown ${cooldownMs}ms after ${failures} failures`);
               }
               continue;
@@ -1120,10 +1132,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
             pushDebug(`headerStyle=${headerStyle} explicit=${explicitQuota}`);
             
             // Check if this header style is rate-limited for this account
-            if (accountManager.isRateLimitedForHeaderStyle(account, family, headerStyle)) {
+            if (accountManager.isRateLimitedForHeaderStyle(account, family, headerStyle, model)) {
               // Quota fallback: try alternate quota on same account (if enabled and not explicit)
               if (config.quota_fallback && !explicitQuota && family === "gemini") {
-                const alternateStyle = accountManager.getAvailableHeaderStyle(account, family);
+                const alternateStyle = accountManager.getAvailableHeaderStyle(account, family, model);
                 if (alternateStyle && alternateStyle !== headerStyle) {
                   const quotaName = headerStyle === "gemini-cli" ? "Gemini CLI" : "Antigravity";
                   const altQuotaName = alternateStyle === "gemini-cli" ? "Gemini CLI" : "Antigravity";
@@ -1160,7 +1172,6 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   currentEndpoint,
                   headerStyle,
                   forceThinkingRecovery,
-                  { claudeToolHardening: config.claude_tool_hardening },
                 );
 
                 // Show thinking recovery toast (respects quiet mode)
@@ -1216,7 +1227,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                     pushDebug(`429 reason=${bodyInfo.reason}`);
                   }
 
-                  logRateLimitEvent(
+                   logRateLimitEvent(
                     account.index,
                     account.email,
                     family,
@@ -1228,7 +1239,17 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   await logResponseBody(debugContext, response, 429);
 
                   if (isCapacityExhausted) {
-                    accountManager.markRateLimited(account, delayMs, family, headerStyle);
+                    accountManager.markRateLimited(account, delayMs, family, headerStyle, model);
+                    
+                    // For Gemini, try prioritized Antigravity across ALL accounts first
+                    if (family === "gemini" && headerStyle === "antigravity") {
+                      if (hasOtherAccountWithAntigravity(account)) {
+                        pushDebug(`capacity exhausted on account ${account.index}, but available on others. Switching account.`);
+                        shouldSwitchAccount = true;
+                        break;
+                      }
+                    }
+
                     await showToast(
                       `Model capacity exhausted for ${family}. Retrying in ${waitTimeFormatted} (attempt ${attempt})...`,
                       "warning",
@@ -1248,7 +1269,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
 
 
                   // Mark this header style as rate-limited for this account
-                  accountManager.markRateLimited(account, delayMs, family, headerStyle);
+                  accountManager.markRateLimited(account, delayMs, family, headerStyle, model);
 
                   try {
                     await accountManager.saveToDisk();
@@ -1256,10 +1277,36 @@ export const createAntigravityPlugin = (providerId: string) => async (
                     log.error("Failed to persist rate-limit state", { error: String(error) });
                   }
 
-                  // No auto-fallback: user controls quota via model suffix
-                  // Just show rate limit toast and switch accounts if available
+                  // For Gemini, try prioritized Antigravity across ALL accounts first
+                  if (family === "gemini") {
+                    if (headerStyle === "antigravity") {
+                      // Check if any other account has Antigravity quota for this model
+                      if (hasOtherAccountWithAntigravity(account)) {
+                        pushDebug(`antigravity exhausted on account ${account.index}, but available on others. Switching account.`);
+                        shouldSwitchAccount = true;
+                        break;
+                      }
+
+                      // All accounts exhausted for Antigravity on THIS model.
+                      // Before falling back to gemini-cli, check if it's the last option (automatic fallback)
+                      if (config.quota_fallback && !explicitQuota) {
+                        const alternateStyle = accountManager.getAvailableHeaderStyle(account, family, model);
+                        if (alternateStyle && alternateStyle !== headerStyle) {
+                          const safeModelName = model || "this model";
+                          await showToast(
+                            `Antigravity quota exhausted for ${safeModelName}. Switching to Gemini CLI quota... Tip: Other Gemini models may still have quota.`,
+                            "warning"
+                          );
+                          headerStyle = alternateStyle;
+                          pushDebug(`quota fallback: ${headerStyle}`);
+                          continue; // Retry with new headerStyle
+                        }
+                      }
+                    }
+                  }
+
                   const quotaName = headerStyle === "antigravity" ? "Antigravity" : "Gemini CLI";
-                  
+
                   if (accountCount > 1) {
                     const quotaMsg = bodyInfo.quotaResetTime 
                       ? ` (quota resets ${bodyInfo.quotaResetTime})`
@@ -1476,6 +1523,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 lastError = error instanceof Error ? error : new Error(String(error));
                 if (shouldCooldown) {
                   accountManager.markAccountCoolingDown(account, cooldownMs, "network-error");
+                  accountManager.markRateLimited(account, cooldownMs, family, headerStyle, model);
                   pushDebug(`endpoint-error: cooldown ${cooldownMs}ms after ${failures} failures`);
                 }
                 shouldSwitchAccount = true;
