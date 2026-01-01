@@ -34,7 +34,7 @@ Install the opencode-antigravity-auth plugin and add the Antigravity model defin
 
    ```json
    {
-     "plugin": ["opencode-antigravity-auth@beta"]
+     "plugin": ["opencode-antigravity-auth@1.2.7"]
    }
    ```
 
@@ -48,7 +48,7 @@ Install the opencode-antigravity-auth plugin and add the Antigravity model defin
 
    ```json
    {
-     "plugin": ["opencode-antigravity-auth@beta"],
+     "plugin": ["opencode-antigravity-auth@1.2.7"],
      "provider": {
        "google": {
          "models": {
@@ -88,7 +88,7 @@ Create `~/.config/opencode/opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-antigravity-auth@beta"],
+  "plugin": ["opencode-antigravity-auth@1.2.7"],
   "provider": {
     "google": {
       "models": {
@@ -193,7 +193,7 @@ Models without `antigravity-` prefix use Gemini CLI quota:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-antigravity-auth@beta"],
+  "plugin": ["opencode-antigravity-auth@1.2.7"],
   "provider": {
     "google": {
       "models": {
