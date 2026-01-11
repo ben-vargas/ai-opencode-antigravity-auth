@@ -4,9 +4,90 @@
  * Handles Gemini model-specific request transformations including:
  * - Thinking config (camelCase keys, thinkingLevel for Gemini 3)
  * - Tool normalization (function/custom format)
+ * - Schema transformation (JSON Schema -> Gemini Schema format)
  */
 
 import type { RequestPayload, ThinkingConfig, ThinkingTier } from "./types";
+
+/**
+ * Transform a JSON Schema to Gemini-compatible format.
+ * Based on @google/genai SDK's processJsonSchema() function.
+ * 
+ * Key transformations:
+ * - Converts type values to uppercase (object -> OBJECT)
+ * - Removes unsupported fields like additionalProperties, $schema
+ * - Recursively processes nested schemas (properties, items, anyOf, etc.)
+ * 
+ * @param schema - A JSON Schema object or primitive value
+ * @returns Gemini-compatible schema
+ */
+export function toGeminiSchema(schema: unknown): unknown {
+  // Return primitives and arrays as-is
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return schema;
+  }
+
+  const inputSchema = schema as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+
+  // First pass: collect all property names for required validation
+  const propertyNames = new Set<string>();
+  if (inputSchema.properties && typeof inputSchema.properties === "object") {
+    for (const propName of Object.keys(inputSchema.properties as Record<string, unknown>)) {
+      propertyNames.add(propName);
+    }
+  }
+
+  for (const [key, value] of Object.entries(inputSchema)) {
+    // Skip unsupported fields that Gemini API rejects
+    if (key === "additionalProperties" || key === "$schema" || key === "$id" || key === "$comment") {
+      continue;
+    }
+
+    if (key === "type" && typeof value === "string") {
+      // Convert type to uppercase for Gemini API
+      result[key] = value.toUpperCase();
+    } else if (key === "properties" && typeof value === "object" && value !== null) {
+      // Recursively transform nested property schemas
+      const props: Record<string, unknown> = {};
+      for (const [propName, propSchema] of Object.entries(value as Record<string, unknown>)) {
+        props[propName] = toGeminiSchema(propSchema);
+      }
+      result[key] = props;
+    } else if (key === "items" && typeof value === "object") {
+      // Transform array items schema
+      result[key] = toGeminiSchema(value);
+    } else if ((key === "anyOf" || key === "oneOf" || key === "allOf") && Array.isArray(value)) {
+      // Transform union type schemas
+      result[key] = value.map((item) => toGeminiSchema(item));
+    } else if (key === "enum" && Array.isArray(value)) {
+      // Keep enum values as-is
+      result[key] = value;
+    } else if (key === "default" || key === "examples") {
+      // Keep default and examples as-is
+      result[key] = value;
+    } else if (key === "required" && Array.isArray(value)) {
+      // Filter required array to only include properties that exist
+      // This fixes: "parameters.required[X]: property is not defined"
+      if (propertyNames.size > 0) {
+        const validRequired = value.filter((prop) => 
+          typeof prop === "string" && propertyNames.has(prop)
+        );
+        if (validRequired.length > 0) {
+          result[key] = validRequired;
+        }
+        // If no valid required properties, omit the required field entirely
+      } else {
+        // If there are no properties, keep required as-is (might be a schema without properties)
+        result[key] = value;
+      }
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
 
 /**
  * Check if a model is a Gemini model (not Claude).
@@ -88,15 +169,14 @@ export function normalizeGeminiTools(
     ].filter(Boolean);
 
     const placeholderSchema: Record<string, unknown> = {
-      type: "object",
+      type: "OBJECT",
       properties: {
         _placeholder: {
-          type: "boolean",
+          type: "BOOLEAN",
           description: "Placeholder. Always pass true.",
         },
       },
       required: ["_placeholder"],
-      additionalProperties: false,
     };
 
     let schema = schemaCandidates[0] as Record<string, unknown> | undefined;
@@ -104,6 +184,9 @@ export function normalizeGeminiTools(
     if (!schemaObjectOk) {
       schema = placeholderSchema;
       toolDebugMissing += 1;
+    } else {
+      // Transform existing schema to Gemini-compatible format
+      schema = toGeminiSchema(schema) as Record<string, unknown>;
     }
 
     const nameCandidate =
@@ -112,13 +195,13 @@ export function normalizeGeminiTools(
       (newTool.custom as Record<string, unknown> | undefined)?.name ||
       `tool-${toolIndex}`;
 
-    // Ensure function has input_schema
-    if (newTool.function && !(newTool.function as Record<string, unknown>).input_schema && schema) {
+    // Always update function.input_schema with transformed schema
+    if (newTool.function && schema) {
       (newTool.function as Record<string, unknown>).input_schema = schema;
     }
     
-    // Ensure custom has input_schema
-    if (newTool.custom && !(newTool.custom as Record<string, unknown>).input_schema && schema) {
+    // Always update custom.input_schema with transformed schema
+    if (newTool.custom && schema) {
       (newTool.custom as Record<string, unknown>).input_schema = schema;
     }
     
@@ -148,9 +231,8 @@ export function normalizeGeminiTools(
     // Ensure custom has input_schema
     if (newTool.custom && !(newTool.custom as Record<string, unknown>).input_schema) {
       (newTool.custom as Record<string, unknown>).input_schema = { 
-        type: "object", 
+        type: "OBJECT", 
         properties: {}, 
-        additionalProperties: false 
       };
       toolDebugMissing += 1;
     }
