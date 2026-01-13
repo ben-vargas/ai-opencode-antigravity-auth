@@ -239,7 +239,7 @@ export const AntigravityConfigSchema = z.object({
    * Env override: OPENCODE_ANTIGRAVITY_ACCOUNT_SELECTION_STRATEGY
    * @default "hybrid"
    */
-  account_selection_strategy: AccountSelectionStrategySchema.default('sticky'),
+  account_selection_strategy: AccountSelectionStrategySchema.default('hybrid'),
   
   /**
    * Enable PID-based account offset for multi-session distribution.
