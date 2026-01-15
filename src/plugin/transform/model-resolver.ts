@@ -51,15 +51,17 @@ export const MODEL_ALIASES: Record<string, string> = {
   "gemini-claude-opus-4-5-thinking-medium": "claude-opus-4-5-thinking",
   "gemini-claude-opus-4-5-thinking-high": "claude-opus-4-5-thinking",
 
-  // Image variants
-  "gemini-3-pro-image-preview": "gemini-3-pro-image",
+  // Image generation models - only gemini-3-pro-image is available via Antigravity API
+  // Note: gemini-2.5-flash-image (Nano Banana) is NOT supported by Antigravity - only Google AI API
+  // Reference: Antigravity-Manager/src-tauri/src/proxy/common/model_mapping.rs
 };
 
 /**
  * Model fallbacks when primary model is unavailable.
+ * NOTE: Image models should NOT fall back to non-image models!
  */
 export const MODEL_FALLBACKS: Record<string, string> = {
-  "gemini-2.5-flash-image": "gemini-2.5-flash",
+  // No fallbacks for image models - they must stay as image models
 };
 
 const TIER_REGEX = /-(minimal|low|medium|high)$/;
@@ -70,6 +72,12 @@ const QUOTA_PREFIX_REGEX = /^antigravity-/i;
  * These automatically route to Antigravity even without the prefix.
  */
 const ANTIGRAVITY_ONLY_MODELS = /^(claude|gpt)/i;
+
+/**
+ * Image generation models - always route to Antigravity.
+ * These models don't support thinking and require imageConfig.
+ */
+const IMAGE_GENERATION_MODELS = /image|imagen/i;
 
 /**
  * Legacy Gemini 3 model names that should route to Antigravity quota.
@@ -175,7 +183,10 @@ export function resolveModelWithTier(requestedModel: string): ResolvedModel {
 
   const isAntigravityOnly = ANTIGRAVITY_ONLY_MODELS.test(modelWithoutQuota);
   const isLegacyAntigravity = LEGACY_ANTIGRAVITY_GEMINI3.test(modelWithoutQuota);
-  const quotaPreference = isAntigravity || isAntigravityOnly || isLegacyAntigravity ? "antigravity" : "gemini-cli";
+  const isImageModel = IMAGE_GENERATION_MODELS.test(modelWithoutQuota);
+  
+  // Image models always route to Antigravity
+  const quotaPreference = isAntigravity || isAntigravityOnly || isLegacyAntigravity || isImageModel ? "antigravity" : "gemini-cli";
   const explicitQuota = isAntigravity;
 
   const isGemini3 = modelWithoutQuota.toLowerCase().startsWith("gemini-3");
@@ -189,7 +200,7 @@ export function resolveModelWithTier(requestedModel: string): ResolvedModel {
   
   let antigravityModel = modelWithoutQuota;
   if (skipAlias) {
-    if (isGemini3Pro && !tier) {
+    if (isGemini3Pro && !tier && !isImageModel) {
       antigravityModel = `${modelWithoutQuota}-low`;
     } else if (isGemini3Flash && tier) {
       antigravityModel = baseName;
@@ -202,6 +213,17 @@ export function resolveModelWithTier(requestedModel: string): ResolvedModel {
 
   const resolvedModel = MODEL_FALLBACKS[actualModel] || actualModel;
   const isThinking = isThinkingCapableModel(resolvedModel);
+
+  // Image generation models don't support thinking - return early without thinking config
+  if (isImageModel) {
+    return {
+      actualModel: resolvedModel,
+      isThinkingModel: false,
+      isImageModel: true,
+      quotaPreference,
+      explicitQuota,
+    };
+  }
 
   // Check if this is a Gemini 3 model (works for both aliased and skipAlias paths)
   const isEffectiveGemini3 = resolvedModel.toLowerCase().includes("gemini-3");
@@ -288,6 +310,60 @@ function budgetToGemini3Level(budget: number): "low" | "medium" | "high" {
   if (budget <= 8192) return "low";
   if (budget <= 16384) return "medium";
   return "high";
+}
+
+/**
+ * Resolves model name for a specific headerStyle (quota fallback support).
+ * Transforms model names when switching between gemini-cli and antigravity quotas.
+ * 
+ * Issue #103: When quota fallback occurs, model names need to be transformed:
+ * - gemini-3-flash-preview (gemini-cli) → gemini-3-flash (antigravity)
+ * - gemini-3-pro-preview (gemini-cli) → gemini-3-pro-low (antigravity)
+ * - gemini-3-flash (antigravity) → gemini-3-flash-preview (gemini-cli)
+ */
+export function resolveModelForHeaderStyle(
+  requestedModel: string,
+  headerStyle: "antigravity" | "gemini-cli"
+): ResolvedModel {
+  const lower = requestedModel.toLowerCase();
+  const isGemini3 = lower.includes("gemini-3");
+  
+  if (!isGemini3) {
+    return resolveModelWithTier(requestedModel);
+  }
+
+  if (headerStyle === "antigravity") {
+    let transformedModel = requestedModel
+      .replace(/-preview$/i, "")
+      .replace(/^antigravity-/i, "");
+    
+    const isGemini3Pro = transformedModel.toLowerCase().startsWith("gemini-3-pro");
+    const hasTierSuffix = /-(low|medium|high)$/i.test(transformedModel);
+    
+    if (isGemini3Pro && !hasTierSuffix) {
+      transformedModel = `${transformedModel}-low`;
+    }
+    
+    const prefixedModel = `antigravity-${transformedModel}`;
+    return resolveModelWithTier(prefixedModel);
+  }
+  
+  if (headerStyle === "gemini-cli") {
+    let transformedModel = requestedModel
+      .replace(/^antigravity-/i, "")
+      .replace(/-(low|medium|high)$/i, "");
+    
+    if (!transformedModel.endsWith("-preview")) {
+      transformedModel = `${transformedModel}-preview`;
+    }
+    
+    return {
+      ...resolveModelWithTier(transformedModel),
+      quotaPreference: "gemini-cli",
+    };
+  }
+
+  return resolveModelWithTier(requestedModel);
 }
 
 /**

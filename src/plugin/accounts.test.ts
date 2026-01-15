@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AccountManager, type ModelFamily, type HeaderStyle } from "./accounts";
+import { AccountManager, type ModelFamily, type HeaderStyle, parseRateLimitReason, calculateBackoffMs, type RateLimitReason } from "./accounts";
 import type { AccountStorageV3 } from "./storage";
 import type { OAuthAuthDetails } from "./types";
 
@@ -769,6 +769,101 @@ describe("AccountManager", () => {
         expect(fourth?.index).toBe(fifth?.index);
       });
     });
+
+    describe("priority-queue strategy", () => {
+      it("returns account based on health and token availability", () => {
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r3", projectId: "p3", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+
+        const first = manager.getCurrentOrNextForFamily("claude", null, "priority-queue");
+        expect(first).not.toBeNull();
+        expect([0, 1, 2]).toContain(first?.index);
+      });
+
+      it("skips rate-limited accounts", () => {
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const accounts = manager.getAccounts();
+        manager.markRateLimited(accounts[0]!, 60000, "claude");
+
+        const selected = manager.getCurrentOrNextForFamily("claude", null, "priority-queue");
+        expect(selected?.index).toBe(1);
+      });
+
+      it("skips cooling down accounts", () => {
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const accounts = manager.getAccounts();
+        manager.markAccountCoolingDown(accounts[0]!, 60000, "auth-failure");
+
+        const selected = manager.getCurrentOrNextForFamily("claude", null, "priority-queue");
+        expect(selected?.index).toBe(1);
+      });
+
+      it("falls back to sticky when all accounts unavailable", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(0));
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+
+        const selected = manager.getCurrentOrNextForFamily("claude", null, "priority-queue");
+        expect(selected?.index).toBe(0);
+      });
+
+      it("updates lastUsed and currentAccountIndexByFamily on selection", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(5000));
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+            { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const selected = manager.getCurrentOrNextForFamily("claude", null, "priority-queue");
+
+        expect(selected).not.toBeNull();
+        expect(selected!.lastUsed).toBe(5000);
+        expect(manager.getCurrentAccountForFamily("claude")?.index).toBe(selected?.index);
+      });
+    });
   });
 
   describe("touchedForQuota tracking", () => {
@@ -888,6 +983,379 @@ describe("AccountManager", () => {
 
       account.consecutiveFailures = 0;
       expect(account.consecutiveFailures).toBe(0);
+    });
+  });
+
+  describe("Issue #147: headerStyle-aware account selection", () => {
+    it("skips account when requested headerStyle is rate-limited even if other style is available", () => {
+      const stored: AccountStorageV3 = {
+        version: 3,
+        accounts: [
+          { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+        ],
+        activeIndex: 0,
+        activeIndexByFamily: { claude: 0, gemini: 0 },
+      };
+
+      const manager = new AccountManager(undefined, stored);
+      const firstAccount = manager.getCurrentOrNextForFamily("gemini");
+
+      // Mark ONLY antigravity as rate-limited (gemini-cli is still available)
+      manager.markRateLimited(firstAccount!, 60000, "gemini", "antigravity");
+
+      // Verify: antigravity is limited, gemini-cli is not
+      expect(manager.isRateLimitedForHeaderStyle(firstAccount!, "gemini", "antigravity")).toBe(true);
+      expect(manager.isRateLimitedForHeaderStyle(firstAccount!, "gemini", "gemini-cli")).toBe(false);
+
+      // BUG: When we explicitly request antigravity headerStyle, 
+      // we should skip this account and get the next one
+      // Current behavior: returns the same account because "family" is not fully limited
+      const nextAccount = manager.getCurrentOrNextForFamily(
+        "gemini", 
+        null, 
+        "sticky", 
+        "antigravity"  // Explicitly requesting antigravity
+      );
+
+      // Verifies headerStyle-aware account selection: should skip account 0
+      // because its antigravity quota is limited, even though gemini-cli is available
+      expect(nextAccount?.index).toBe(1);
+    });
+
+    it("returns same account when a different headerStyle is rate-limited", () => {
+      const stored: AccountStorageV3 = {
+        version: 3,
+        accounts: [
+          { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          { refreshToken: "r2", projectId: "p2", addedAt: 1, lastUsed: 0 },
+        ],
+        activeIndex: 0,
+        activeIndexByFamily: { claude: 0, gemini: 0 },
+      };
+
+      const manager = new AccountManager(undefined, stored);
+      const firstAccount = manager.getCurrentOrNextForFamily("gemini");
+
+      // Mark gemini-cli as rate-limited (antigravity is still available)
+      manager.markRateLimited(firstAccount!, 60000, "gemini", "gemini-cli");
+
+      // When requesting antigravity, should return the same account
+      // because antigravity quota is still available
+      const nextAccount = manager.getCurrentOrNextForFamily(
+        "gemini", 
+        null, 
+        "sticky", 
+        "antigravity"  // Requesting antigravity which is NOT limited
+      );
+
+      expect(nextAccount?.index).toBe(0); // Should stay on account 0
+    });
+  });
+
+  describe("Issue #174: saveToDisk throttling", () => {
+    it("requestSaveToDisk coalesces multiple calls into one write", async () => {
+      vi.useFakeTimers();
+
+      const stored: AccountStorageV3 = {
+        version: 3,
+        accounts: [
+          { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+        ],
+        activeIndex: 0,
+      };
+
+      const manager = new AccountManager(undefined, stored);
+      const saveSpy = vi.spyOn(manager, "saveToDisk").mockResolvedValue();
+
+      manager.requestSaveToDisk();
+      manager.requestSaveToDisk();
+      manager.requestSaveToDisk();
+
+      expect(saveSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      saveSpy.mockRestore();
+    });
+
+    it("flushSaveToDisk waits for pending save to complete", async () => {
+      vi.useFakeTimers();
+
+      const stored: AccountStorageV3 = {
+        version: 3,
+        accounts: [
+          { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+        ],
+        activeIndex: 0,
+      };
+
+      const manager = new AccountManager(undefined, stored);
+      const saveSpy = vi.spyOn(manager, "saveToDisk").mockResolvedValue();
+
+      manager.requestSaveToDisk();
+
+      const flushPromise = manager.flushSaveToDisk();
+
+      await vi.advanceTimersByTimeAsync(1500);
+      await flushPromise;
+
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      saveSpy.mockRestore();
+    });
+
+    it("does not save again if no new requestSaveToDisk after flush", async () => {
+      vi.useFakeTimers();
+
+      const stored: AccountStorageV3 = {
+        version: 3,
+        accounts: [
+          { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+        ],
+        activeIndex: 0,
+      };
+
+      const manager = new AccountManager(undefined, stored);
+      const saveSpy = vi.spyOn(manager, "saveToDisk").mockResolvedValue();
+
+      manager.requestSaveToDisk();
+      await vi.advanceTimersByTimeAsync(1500);
+
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+
+      saveSpy.mockRestore();
+    });
+  });
+
+  describe("Rate Limit Reason Classification", () => {
+    describe("parseRateLimitReason", () => {
+      it("parses QUOTA_EXHAUSTED from reason field", () => {
+        expect(parseRateLimitReason("QUOTA_EXHAUSTED")).toBe("QUOTA_EXHAUSTED");
+        expect(parseRateLimitReason("quota_exhausted")).toBe("QUOTA_EXHAUSTED");
+      });
+
+      it("parses RATE_LIMIT_EXCEEDED from reason field", () => {
+        expect(parseRateLimitReason("RATE_LIMIT_EXCEEDED")).toBe("RATE_LIMIT_EXCEEDED");
+      });
+
+      it("parses MODEL_CAPACITY_EXHAUSTED from reason field", () => {
+        expect(parseRateLimitReason("MODEL_CAPACITY_EXHAUSTED")).toBe("MODEL_CAPACITY_EXHAUSTED");
+      });
+
+      it("falls back to message parsing when reason is absent", () => {
+        expect(parseRateLimitReason(undefined, "Rate limit exceeded per minute")).toBe("RATE_LIMIT_EXCEEDED");
+        expect(parseRateLimitReason(undefined, "Too many requests")).toBe("RATE_LIMIT_EXCEEDED");
+        expect(parseRateLimitReason(undefined, "Quota exhausted for today")).toBe("QUOTA_EXHAUSTED");
+      });
+
+      it("returns UNKNOWN when no pattern matches", () => {
+        expect(parseRateLimitReason(undefined, "Some other error")).toBe("UNKNOWN");
+        expect(parseRateLimitReason()).toBe("UNKNOWN");
+      });
+    });
+
+    describe("calculateBackoffMs", () => {
+      it("uses retryAfterMs when provided", () => {
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 0, 120_000)).toBe(120_000);
+        expect(calculateBackoffMs("RATE_LIMIT_EXCEEDED", 0, 45_000)).toBe(45_000);
+      });
+
+      it("enforces minimum 2s backoff", () => {
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 0, 500)).toBe(2_000);
+        expect(calculateBackoffMs("RATE_LIMIT_EXCEEDED", 0, 1_000)).toBe(2_000);
+      });
+
+      it("applies exponential backoff for QUOTA_EXHAUSTED", () => {
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 0)).toBe(60_000);
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 1)).toBe(300_000);
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 2)).toBe(1_800_000);
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 3)).toBe(7_200_000);
+        expect(calculateBackoffMs("QUOTA_EXHAUSTED", 10)).toBe(7_200_000);
+      });
+
+      it("returns fixed backoff for RATE_LIMIT_EXCEEDED", () => {
+        expect(calculateBackoffMs("RATE_LIMIT_EXCEEDED", 0)).toBe(30_000);
+        expect(calculateBackoffMs("RATE_LIMIT_EXCEEDED", 5)).toBe(30_000);
+      });
+
+      it("returns short backoff for MODEL_CAPACITY_EXHAUSTED", () => {
+        expect(calculateBackoffMs("MODEL_CAPACITY_EXHAUSTED", 0)).toBe(15_000);
+      });
+
+      it("returns soft retry for SERVER_ERROR", () => {
+        expect(calculateBackoffMs("SERVER_ERROR", 0)).toBe(20_000);
+      });
+
+      it("returns default backoff for UNKNOWN", () => {
+        expect(calculateBackoffMs("UNKNOWN", 0)).toBe(60_000);
+      });
+    });
+
+    describe("markRateLimitedWithReason", () => {
+      it("tracks consecutive failures and applies escalating backoff", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1000);
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const account = manager.getAccounts()[0]!;
+
+        const backoff1 = manager.markRateLimitedWithReason(
+          account, "gemini", "antigravity", null, "QUOTA_EXHAUSTED"
+        );
+        expect(backoff1).toBe(60_000);
+        expect(account.consecutiveFailures).toBe(1);
+
+        const backoff2 = manager.markRateLimitedWithReason(
+          account, "gemini", "antigravity", null, "QUOTA_EXHAUSTED"
+        );
+        expect(backoff2).toBe(300_000);
+        expect(account.consecutiveFailures).toBe(2);
+
+        const backoff3 = manager.markRateLimitedWithReason(
+          account, "gemini", "antigravity", null, "QUOTA_EXHAUSTED"
+        );
+        expect(backoff3).toBe(1_800_000);
+        expect(account.consecutiveFailures).toBe(3);
+
+        vi.useRealTimers();
+      });
+
+      it("uses provided retryAfterMs over calculated backoff", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(1000);
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const account = manager.getAccounts()[0]!;
+
+        const backoff = manager.markRateLimitedWithReason(
+          account, "gemini", "antigravity", null, "QUOTA_EXHAUSTED", 180_000
+        );
+        expect(backoff).toBe(180_000);
+
+        vi.useRealTimers();
+      });
+    });
+
+    describe("markRequestSuccess", () => {
+      it("resets consecutive failure counter", () => {
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const account = manager.getAccounts()[0]!;
+
+        account.consecutiveFailures = 5;
+        manager.markRequestSuccess(account);
+        expect(account.consecutiveFailures).toBe(0);
+      });
+    });
+
+    describe("Optimistic Reset", () => {
+      it("shouldTryOptimisticReset returns true when min wait time <= 2s", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10_000);
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0, rateLimitResetTimes: { "gemini-antigravity": 11_500, "gemini-cli": 11_500 } },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        expect(manager.shouldTryOptimisticReset("gemini")).toBe(true);
+
+        vi.useRealTimers();
+      });
+
+      it("shouldTryOptimisticReset returns false when min wait time > 2s", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10_000);
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0, rateLimitResetTimes: { "gemini-antigravity": 15_000, "gemini-cli": 15_000 } },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        expect(manager.shouldTryOptimisticReset("gemini")).toBe(false);
+
+        vi.useRealTimers();
+      });
+
+      it("shouldTryOptimisticReset returns false when accounts are available", () => {
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0 },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        expect(manager.shouldTryOptimisticReset("gemini")).toBe(false);
+      });
+
+      it("clearAllRateLimitsForFamily clears rate limits and failure counters", () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(10_000);
+
+        const stored: AccountStorageV3 = {
+          version: 3,
+          accounts: [
+            { refreshToken: "r1", projectId: "p1", addedAt: 1, lastUsed: 0, rateLimitResetTimes: { "gemini-antigravity": 70_000, "gemini-cli": 80_000 } },
+            { refreshToken: "r2", projectId: "p2", addedAt: 2, lastUsed: 0, rateLimitResetTimes: { "gemini-antigravity": 90_000 } },
+          ],
+          activeIndex: 0,
+        };
+
+        const manager = new AccountManager(undefined, stored);
+        const accounts = manager.getAccounts();
+        accounts[0]!.consecutiveFailures = 3;
+        accounts[1]!.consecutiveFailures = 2;
+
+        manager.clearAllRateLimitsForFamily("gemini");
+
+        expect(accounts[0]!.rateLimitResetTimes["gemini-antigravity"]).toBeUndefined();
+        expect(accounts[0]!.rateLimitResetTimes["gemini-cli"]).toBeUndefined();
+        expect(accounts[1]!.rateLimitResetTimes["gemini-antigravity"]).toBeUndefined();
+        expect(accounts[0]!.consecutiveFailures).toBe(0);
+        expect(accounts[1]!.consecutiveFailures).toBe(0);
+
+        vi.useRealTimers();
+      });
     });
   });
 });

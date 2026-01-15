@@ -20,6 +20,7 @@ export type {
 export {
   resolveModelWithTier,
   resolveModelWithVariant,
+  resolveModelForHeaderStyle,
   getModelFamily,
   MODEL_ALIASES,
   MODEL_FALLBACKS,
@@ -48,12 +49,14 @@ export {
   isGeminiModel,
   isGemini3Model,
   isGemini25Model,
+  isImageGenerationModel,
   buildGemini3ThinkingConfig,
   buildGemini25ThinkingConfig,
+  buildImageGenerationConfig,
   normalizeGeminiTools,
   applyGeminiTransforms,
 } from "./gemini";
-export type { GeminiTransformOptions, GeminiTransformResult } from "./gemini";
+export type { GeminiTransformOptions, GeminiTransformResult, ImageConfig } from "./gemini";
 
 // Cross-model sanitization
 export {

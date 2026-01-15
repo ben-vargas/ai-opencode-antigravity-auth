@@ -1,6 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { deduplicateAccountsByEmail, migrateV2ToV3, loadAccounts, type AccountMetadata, type AccountStorage } from "./storage";
+import {
+  deduplicateAccountsByEmail,
+  migrateV2ToV3,
+  loadAccounts,
+  type AccountMetadata,
+  type AccountStorage,
+} from "./storage";
 import { promises as fs } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+} from "node:fs";
 
 vi.mock("proper-lockfile", () => ({
   default: {
@@ -16,7 +28,12 @@ describe("deduplicateAccountsByEmail", () => {
 
   it("returns single account unchanged", () => {
     const accounts: AccountMetadata[] = [
-      { email: "test@example.com", refreshToken: "r1", addedAt: 1000, lastUsed: 2000 },
+      {
+        email: "test@example.com",
+        refreshToken: "r1",
+        addedAt: 1000,
+        lastUsed: 2000,
+      },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toEqual(accounts);
@@ -35,8 +52,18 @@ describe("deduplicateAccountsByEmail", () => {
 
   it("deduplicates accounts with same email, keeping newest by lastUsed", () => {
     const accounts: AccountMetadata[] = [
-      { email: "test@example.com", refreshToken: "old-token", addedAt: 1000, lastUsed: 1000 },
-      { email: "test@example.com", refreshToken: "new-token", addedAt: 2000, lastUsed: 3000 },
+      {
+        email: "test@example.com",
+        refreshToken: "old-token",
+        addedAt: 1000,
+        lastUsed: 1000,
+      },
+      {
+        email: "test@example.com",
+        refreshToken: "new-token",
+        addedAt: 2000,
+        lastUsed: 3000,
+      },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(1);
@@ -46,8 +73,18 @@ describe("deduplicateAccountsByEmail", () => {
 
   it("deduplicates accounts with same email, keeping newest by addedAt when lastUsed is equal", () => {
     const accounts: AccountMetadata[] = [
-      { email: "test@example.com", refreshToken: "old-token", addedAt: 1000, lastUsed: 0 },
-      { email: "test@example.com", refreshToken: "new-token", addedAt: 2000, lastUsed: 0 },
+      {
+        email: "test@example.com",
+        refreshToken: "old-token",
+        addedAt: 1000,
+        lastUsed: 0,
+      },
+      {
+        email: "test@example.com",
+        refreshToken: "new-token",
+        addedAt: 2000,
+        lastUsed: 0,
+      },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(1);
@@ -56,27 +93,67 @@ describe("deduplicateAccountsByEmail", () => {
 
   it("handles multiple duplicate emails correctly", () => {
     const accounts: AccountMetadata[] = [
-      { email: "alice@example.com", refreshToken: "alice-old", addedAt: 1000, lastUsed: 1000 },
-      { email: "bob@example.com", refreshToken: "bob-old", addedAt: 1000, lastUsed: 1000 },
-      { email: "alice@example.com", refreshToken: "alice-new", addedAt: 2000, lastUsed: 3000 },
-      { email: "bob@example.com", refreshToken: "bob-new", addedAt: 2000, lastUsed: 3000 },
-      { email: "alice@example.com", refreshToken: "alice-mid", addedAt: 1500, lastUsed: 2000 },
+      {
+        email: "alice@example.com",
+        refreshToken: "alice-old",
+        addedAt: 1000,
+        lastUsed: 1000,
+      },
+      {
+        email: "bob@example.com",
+        refreshToken: "bob-old",
+        addedAt: 1000,
+        lastUsed: 1000,
+      },
+      {
+        email: "alice@example.com",
+        refreshToken: "alice-new",
+        addedAt: 2000,
+        lastUsed: 3000,
+      },
+      {
+        email: "bob@example.com",
+        refreshToken: "bob-new",
+        addedAt: 2000,
+        lastUsed: 3000,
+      },
+      {
+        email: "alice@example.com",
+        refreshToken: "alice-mid",
+        addedAt: 1500,
+        lastUsed: 2000,
+      },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(2);
-    
-    const alice = result.find(a => a.email === "alice@example.com");
-    const bob = result.find(a => a.email === "bob@example.com");
-    
+
+    const alice = result.find((a) => a.email === "alice@example.com");
+    const bob = result.find((a) => a.email === "bob@example.com");
+
     expect(alice?.refreshToken).toBe("alice-new");
     expect(bob?.refreshToken).toBe("bob-new");
   });
 
   it("preserves order of kept accounts based on newest entry index", () => {
     const accounts: AccountMetadata[] = [
-      { email: "first@example.com", refreshToken: "first-old", addedAt: 1000, lastUsed: 1000 },
-      { email: "second@example.com", refreshToken: "second-new", addedAt: 3000, lastUsed: 3000 },
-      { email: "first@example.com", refreshToken: "first-new", addedAt: 2000, lastUsed: 2000 },
+      {
+        email: "first@example.com",
+        refreshToken: "first-old",
+        addedAt: 1000,
+        lastUsed: 1000,
+      },
+      {
+        email: "second@example.com",
+        refreshToken: "second-new",
+        addedAt: 3000,
+        lastUsed: 3000,
+      },
+      {
+        email: "first@example.com",
+        refreshToken: "first-new",
+        addedAt: 2000,
+        lastUsed: 2000,
+      },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(2);
@@ -87,14 +164,24 @@ describe("deduplicateAccountsByEmail", () => {
 
   it("mixes accounts with and without email correctly", () => {
     const accounts: AccountMetadata[] = [
-      { email: "test@example.com", refreshToken: "r1", addedAt: 1000, lastUsed: 1000 },
+      {
+        email: "test@example.com",
+        refreshToken: "r1",
+        addedAt: 1000,
+        lastUsed: 1000,
+      },
       { refreshToken: "no-email-1", addedAt: 1500, lastUsed: 1500 },
-      { email: "test@example.com", refreshToken: "r2", addedAt: 2000, lastUsed: 2000 },
+      {
+        email: "test@example.com",
+        refreshToken: "r2",
+        addedAt: 2000,
+        lastUsed: 2000,
+      },
       { refreshToken: "no-email-2", addedAt: 2500, lastUsed: 2500 },
     ];
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(3);
-    
+
     // no-email-1 at index 1
     // r2 (newest for test@example.com) at index 2
     // no-email-2 at index 3
@@ -114,7 +201,7 @@ describe("deduplicateAccountsByEmail", () => {
         lastUsed: 1000 + i * 100,
       });
     }
-    
+
     const result = deduplicateAccountsByEmail(accounts);
     expect(result).toHaveLength(1);
     expect(result[0]?.refreshToken).toBe("token-10"); // The newest one
@@ -134,7 +221,12 @@ vi.mock("node:fs", async () => {
       access: vi.fn().mockResolvedValue(undefined),
       unlink: vi.fn(),
       rename: vi.fn().mockResolvedValue(undefined),
+      appendFile: vi.fn(),
     },
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    appendFileSync: vi.fn(),
   };
 });
 
@@ -165,7 +257,7 @@ describe("Storage Migration", () => {
       expect(v3.version).toBe(3);
       const account = v3.accounts[0];
       if (!account) throw new Error("Account not found");
-      
+
       expect(account.rateLimitResetTimes).toEqual({
         "gemini-antigravity": future,
       });
@@ -297,29 +389,159 @@ describe("Storage Migration", () => {
         activeIndex: 0,
       };
 
-      vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify(v2Data));
-      
+      // Mock readFile to return different values based on path
+      vi.mocked(fs.readFile).mockImplementation((path) => {
+        if ((path as string).endsWith(".gitignore")) {
+          const error = new Error("ENOENT") as NodeJS.ErrnoException;
+          error.code = "ENOENT";
+          return Promise.reject(error);
+        }
+        return Promise.resolve(JSON.stringify(v2Data));
+      });
+
       const result = await loadAccounts();
 
       expect(result).not.toBeNull();
       expect(result?.version).toBe(3);
-      
+
       const account = result?.accounts[0];
       if (!account) throw new Error("Account not found");
-      
+
       expect(account.rateLimitResetTimes).toEqual({
         "gemini-antigravity": future,
       });
 
       expect(fs.writeFile).toHaveBeenCalled();
-      const saveCall = vi.mocked(fs.writeFile).mock.calls[0];
-      if (!saveCall) throw new Error("saveAccounts was not called");
       
+      const saveCall = vi.mocked(fs.writeFile).mock.calls.find(
+        (call) => (call[0] as string).includes(".tmp")
+      );
+      if (!saveCall) throw new Error("saveAccounts was not called (tmp file not found)");
+
       const savedContent = JSON.parse(saveCall[1] as string);
       expect(savedContent.version).toBe(3);
       expect(savedContent.accounts[0].rateLimitResetTimes).toEqual({
         "gemini-antigravity": future,
       });
+
+      const gitignoreCall = vi.mocked(fs.writeFile).mock.calls.find(
+        (call) => (call[0] as string).includes(".gitignore")
+      );
+      expect(gitignoreCall).toBeDefined();
+    });
+  });
+
+  describe("ensureGitignore", () => {
+    const configDir = "/tmp/opencode-test";
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("creates .gitignore when file does not exist", async () => {
+      vi.mocked(fs.readFile).mockRejectedValue({ code: "ENOENT" });
+
+      const { ensureGitignore } = await import("./storage");
+      await ensureGitignore(configDir);
+
+      expect(fs.writeFile).toHaveBeenCalled();
+      const [path, content] = vi.mocked(fs.writeFile).mock.calls[0]!;
+      expect(path).toContain(".gitignore");
+      expect(content).toContain("antigravity-accounts.json");
+      expect(content).toContain("antigravity-signature-cache.json");
+      expect(content).toContain("antigravity-logs/");
+    });
+
+    it("appends missing entries to existing .gitignore", async () => {
+      vi.mocked(fs.readFile).mockResolvedValue("existing-entry");
+
+      const { ensureGitignore } = await import("./storage");
+      await ensureGitignore(configDir);
+
+      expect(fs.appendFile).toHaveBeenCalled();
+      const [path, content] = vi.mocked(fs.appendFile).mock.calls[0]!;
+      expect(path).toContain(".gitignore");
+      expect(content).toContain("antigravity-accounts.json");
+      expect((content as string).startsWith("\n")).toBe(true);
+    });
+
+    it("does nothing when all entries already exist", async () => {
+      const existing = [
+        ".gitignore",
+        "antigravity-accounts.json",
+        "antigravity-signature-cache.json",
+        "antigravity-logs/",
+      ].join("\n");
+      vi.mocked(fs.readFile).mockResolvedValue(existing);
+
+      const { ensureGitignore } = await import("./storage");
+      await ensureGitignore(configDir);
+
+      expect(fs.writeFile).not.toHaveBeenCalled();
+      expect(fs.appendFile).not.toHaveBeenCalled();
+    });
+
+    it("handles permission errors gracefully", async () => {
+      vi.mocked(fs.readFile).mockRejectedValue({ code: "EACCES" });
+
+      const { ensureGitignore } = await import("./storage");
+      await expect(ensureGitignore(configDir)).resolves.not.toThrow();
+
+      expect(fs.writeFile).not.toHaveBeenCalled();
+      expect(fs.appendFile).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("ensureGitignoreSync", () => {
+    const configDir = "/tmp/opencode-test-sync";
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("creates .gitignore when file does not exist", async () => {
+      vi.mocked(existsSync).mockReturnValue(false);
+
+      const { ensureGitignoreSync } = await import("./storage");
+      ensureGitignoreSync(configDir);
+
+      expect(writeFileSync).toHaveBeenCalled();
+      const [path, content] = vi.mocked(writeFileSync).mock.calls[0]!;
+      expect(path).toContain(".gitignore");
+      expect(content).toContain("antigravity-accounts.json");
+      expect(content).toContain("antigravity-signature-cache.json");
+      expect(content).toContain("antigravity-logs/");
+    });
+
+    it("appends missing entries to existing .gitignore", async () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue("existing-entry");
+
+      const { ensureGitignoreSync } = await import("./storage");
+      ensureGitignoreSync(configDir);
+
+      expect(appendFileSync).toHaveBeenCalled();
+      const [path, content] = vi.mocked(appendFileSync).mock.calls[0]!;
+      expect(path).toContain(".gitignore");
+      expect(content).toContain("antigravity-accounts.json");
+      expect((content as string).startsWith("\n")).toBe(true);
+    });
+
+    it("does nothing when all entries already exist", async () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      const existing = [
+        ".gitignore",
+        "antigravity-accounts.json",
+        "antigravity-signature-cache.json",
+        "antigravity-logs/",
+      ].join("\n");
+      vi.mocked(readFileSync).mockReturnValue(existing);
+
+      const { ensureGitignoreSync } = await import("./storage");
+      ensureGitignoreSync(configDir);
+
+      expect(writeFileSync).not.toHaveBeenCalled();
+      expect(appendFileSync).not.toHaveBeenCalled();
     });
   });
 });

@@ -682,5 +682,67 @@ describe("request.ts", () => {
       );
       expect(result.headerStyle).toBe("gemini-cli");
     });
+
+    describe("Issue #103: model name transformation during quota fallback", () => {
+      it("transforms gemini-3-flash-preview to gemini-3-flash for antigravity headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "antigravity"
+        );
+        expect(result.effectiveModel).toBe("gemini-3-flash");
+      });
+
+      it("transforms gemini-3-pro-preview to gemini-3-pro-low for antigravity headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "antigravity"
+        );
+        expect(result.effectiveModel).toBe("gemini-3-pro-low");
+      });
+
+      it("transforms gemini-3-flash to gemini-3-flash-preview for gemini-cli headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "gemini-cli"
+        );
+        expect(result.effectiveModel).toBe("gemini-3-flash-preview");
+      });
+
+      it("transforms gemini-3-pro-low to gemini-3-pro-preview for gemini-cli headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-low:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "gemini-cli"
+        );
+        expect(result.effectiveModel).toBe("gemini-3-pro-preview");
+      });
+
+      it("keeps non-Gemini-3 models unchanged regardless of headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "antigravity"
+        );
+        expect(result.effectiveModel).toBe("gemini-2.5-flash");
+      });
+    });
   });
 });

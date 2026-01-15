@@ -54,10 +54,11 @@ import {
   needsThinkingRecovery,
 } from "./thinking-recovery";
 import { sanitizeCrossModelPayloadInPlace } from "./transform/cross-model-sanitizer";
-import { isGemini3Model } from "./transform";
+import { isGemini3Model, isImageGenerationModel, buildImageGenerationConfig } from "./transform";
 import {
   resolveModelWithTier,
   resolveModelWithVariant,
+  resolveModelForHeaderStyle,
   isClaudeModel,
   isClaudeThinkingModel,
   CLAUDE_THINKING_MAX_OUTPUT_TOKENS,
@@ -626,8 +627,7 @@ export function prepareAntigravityRequest(
   const [, rawModel = "", rawAction = ""] = match;
   const requestedModel = rawModel;
 
-  // Use model resolver for tier-based thinking configuration
-  const resolved = resolveModelWithTier(rawModel);
+  const resolved = resolveModelForHeaderStyle(rawModel, headerStyle);
   const effectiveModel = resolved.actualModel;
 
   const streaming = rawAction === STREAM_ACTION;
@@ -768,16 +768,52 @@ export function prepareAntigravityRequest(
         }
 
         // Resolve thinking configuration based on user settings and model capabilities
-        const userThinkingConfig = extractThinkingConfig(requestPayload, rawGenerationConfig, extraBody);
+        // Image generation models don't support thinking - skip thinking config entirely
+        const isImageModel = isImageGenerationModel(effectiveModel);
+        const userThinkingConfig = isImageModel ? undefined : extractThinkingConfig(requestPayload, rawGenerationConfig, extraBody);
         const hasAssistantHistory = Array.isArray(requestPayload.contents) &&
           requestPayload.contents.some((c: any) => c?.role === "model" || c?.role === "assistant");
 
         // For claude-sonnet-4-5 (without -thinking suffix), ignore client's thinkingConfig
         // Only claude-sonnet-4-5-thinking-* variants should have thinking enabled
         const isClaudeSonnetNonThinking = effectiveModel.toLowerCase() === "claude-sonnet-4-5";
-        const effectiveUserThinkingConfig = isClaudeSonnetNonThinking ? undefined : userThinkingConfig;
+        const effectiveUserThinkingConfig = (isClaudeSonnetNonThinking || isImageModel) ? undefined : userThinkingConfig;
 
-        const finalThinkingConfig = resolveThinkingConfig(
+        // For image models, add imageConfig instead of thinkingConfig
+        if (isImageModel) {
+          const imageConfig = buildImageGenerationConfig();
+          const generationConfig = (rawGenerationConfig ?? {}) as Record<string, unknown>;
+          generationConfig.imageConfig = imageConfig;
+          // Remove any thinkingConfig that might have been set
+          delete generationConfig.thinkingConfig;
+          // Set reasonable defaults for image generation
+          if (!generationConfig.candidateCount) {
+            generationConfig.candidateCount = 1;
+          }
+          requestPayload.generationConfig = generationConfig;
+          
+          // Add safety settings for image generation (permissive to allow creative content)
+          if (!requestPayload.safetySettings) {
+            requestPayload.safetySettings = [
+              { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+              { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+              { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+              { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" },
+              { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_ONLY_HIGH" },
+            ];
+          }
+          
+          // Image models don't support tools - remove them entirely
+          delete requestPayload.tools;
+          delete requestPayload.toolConfig;
+          
+          // Replace system instruction with a simple image generation prompt
+          // Image models should not receive agentic coding assistant instructions
+          requestPayload.systemInstruction = {
+            parts: [{ text: "You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request." }]
+          };
+        } else {
+          const finalThinkingConfig = resolveThinkingConfig(
           effectiveUserThinkingConfig,
           isClaudeSonnetNonThinking ? false : (resolved.isThinkingModel ?? isThinkingCapableModel(effectiveModel)),
           isClaude,
@@ -841,6 +877,7 @@ export function prepareAntigravityRequest(
           delete rawGenerationConfig.thinkingConfig;
           requestPayload.generationConfig = rawGenerationConfig;
         }
+        } // End of else block for non-image models
 
         // Clean up thinking fields from extra_body
         if (extraBody) {
@@ -1089,7 +1126,6 @@ export function prepareAntigravityRequest(
                   },
                 },
                 required: [EMPTY_SCHEMA_PLACEHOLDER_NAME],
-                additionalProperties: false,
               };
 
               let schema: any = schemaCandidates[0];
@@ -1141,13 +1177,26 @@ export function prepareAntigravityRequest(
               return newTool;
             });
 
-            // Gemini 3 API requires: [{functionDeclarations: [{name, description, parameters}, ...]}]
             const normalizedTools = requestPayload.tools as any[];
-            const geminiDeclarations = normalizedTools.map((tool: any) => ({
-              name: tool.name || tool.function?.name,
-              description: tool.description || tool.function?.description,
-              parameters: tool.parameters || tool.input_schema || tool.function?.parameters || tool.function?.input_schema,
-            }));
+            const geminiPlaceholderSchema = {
+              type: "object",
+              properties: {
+                [EMPTY_SCHEMA_PLACEHOLDER_NAME]: {
+                  type: "boolean",
+                  description: EMPTY_SCHEMA_PLACEHOLDER_DESCRIPTION,
+                },
+              },
+              required: [EMPTY_SCHEMA_PLACEHOLDER_NAME],
+            };
+            const geminiDeclarations = normalizedTools.map((tool: any) => {
+              const rawSchema = tool.parameters || tool.input_schema || tool.function?.parameters || tool.function?.input_schema;
+              const cleanedSchema = rawSchema ? cleanJSONSchemaForAntigravity(rawSchema) : geminiPlaceholderSchema;
+              return {
+                name: tool.name || tool.function?.name,
+                description: tool.description || tool.function?.description,
+                parameters: cleanedSchema,
+              };
+            });
             requestPayload.tools = [{ functionDeclarations: geminiDeclarations }];
           }
 

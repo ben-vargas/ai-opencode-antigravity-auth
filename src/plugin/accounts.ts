@@ -2,9 +2,89 @@ import { formatRefreshParts, parseRefreshParts } from "./auth";
 import { loadAccounts, saveAccounts, type AccountStorageV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
+import { getHealthTracker, getTokenTracker, selectPriorityQueueAccount, type AccountWithMetrics, sortByLruWithHealth } from "./rotation";
 
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
 export type { AccountSelectionStrategy } from "./config/schema";
+
+export type RateLimitReason = 
+  | "QUOTA_EXHAUSTED"
+  | "RATE_LIMIT_EXCEEDED" 
+  | "MODEL_CAPACITY_EXHAUSTED"
+  | "SERVICE_CAPACITY_EXHAUSTED"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
+export interface RateLimitBackoffResult {
+  backoffMs: number;
+  reason: RateLimitReason;
+}
+
+const QUOTA_EXHAUSTED_BACKOFFS = [60_000, 300_000, 1_800_000, 7_200_000] as const;
+const RATE_LIMIT_EXCEEDED_BACKOFF = 30_000;
+const MODEL_CAPACITY_EXHAUSTED_BACKOFF = 15_000;
+const SERVICE_CAPACITY_EXHAUSTED_BACKOFFS = [5000, 10000, 20000, 30000, 60000] as const;
+const SERVER_ERROR_BACKOFF = 20_000;
+const UNKNOWN_BACKOFF = 60_000;
+const MIN_BACKOFF_MS = 2_000;
+
+export function parseRateLimitReason(reason?: string, message?: string, quotaResetTime?: string | null): RateLimitReason {
+  if (reason) {
+    switch (reason.toUpperCase()) {
+      case "QUOTA_EXHAUSTED": return "QUOTA_EXHAUSTED";
+      case "RATE_LIMIT_EXCEEDED": return "RATE_LIMIT_EXCEEDED";
+      case "MODEL_CAPACITY_EXHAUSTED": return "MODEL_CAPACITY_EXHAUSTED";
+    }
+  }
+  
+  if (message) {
+    const lower = message.toLowerCase();
+    if (lower.includes("per minute") || lower.includes("rate limit") || lower.includes("too many requests")) {
+      return "RATE_LIMIT_EXCEEDED";
+    }
+    if (lower.includes("resource has been exhausted") && !quotaResetTime) {
+      return "SERVICE_CAPACITY_EXHAUSTED";
+    }
+    if (lower.includes("no capacity")) {
+      return "MODEL_CAPACITY_EXHAUSTED";
+    }
+    if (lower.includes("exhausted") || lower.includes("quota")) {
+      return "QUOTA_EXHAUSTED";
+    }
+  }
+  
+  return "UNKNOWN";
+}
+
+export function calculateBackoffMs(
+  reason: RateLimitReason,
+  consecutiveFailures: number,
+  retryAfterMs?: number | null
+): number {
+  if (retryAfterMs && retryAfterMs > 0) {
+    return Math.max(retryAfterMs, MIN_BACKOFF_MS);
+  }
+  
+  switch (reason) {
+    case "QUOTA_EXHAUSTED": {
+      const index = Math.min(consecutiveFailures, QUOTA_EXHAUSTED_BACKOFFS.length - 1);
+      return QUOTA_EXHAUSTED_BACKOFFS[index] ?? UNKNOWN_BACKOFF;
+    }
+    case "RATE_LIMIT_EXCEEDED":
+      return RATE_LIMIT_EXCEEDED_BACKOFF;
+    case "MODEL_CAPACITY_EXHAUSTED":
+      return MODEL_CAPACITY_EXHAUSTED_BACKOFF;
+    case "SERVICE_CAPACITY_EXHAUSTED": {
+      const index = Math.min(consecutiveFailures, SERVICE_CAPACITY_EXHAUSTED_BACKOFFS.length - 1);
+      return SERVICE_CAPACITY_EXHAUSTED_BACKOFFS[index] ?? SERVICE_CAPACITY_EXHAUSTED_BACKOFFS[0];
+    }
+    case "SERVER_ERROR":
+      return SERVER_ERROR_BACKOFF;
+    case "UNKNOWN":
+    default:
+      return UNKNOWN_BACKOFF;
+  }
+}
 
 export type BaseQuotaKey = "claude" | "gemini-antigravity" | "gemini-cli";
 export type QuotaKey = BaseQuotaKey | `${BaseQuotaKey}:${string}`;
@@ -116,6 +196,10 @@ export class AccountManager {
   };
   private lastToastAccountIndex = -1;
   private lastToastTime = 0;
+
+  private savePending = false;
+  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private savePromiseResolvers: Array<() => void> = [];
 
   static async loadFromDisk(authFallback?: OAuthAuthDetails): Promise<AccountManager> {
     const stored = await loadAccounts();
@@ -275,7 +359,7 @@ export class AccountManager {
     const quotaKey = getQuotaKey(family, headerStyle, model);
 
     if (strategy === 'round-robin') {
-      const next = this.getNextForFamily(family, model);
+      const next = this.getNextForFamily(family, model, headerStyle);
       if (next) {
         this.markTouchedForQuota(next, quotaKey);
         this.currentAccountIndexByFamily[family] = next.index;
@@ -283,19 +367,61 @@ export class AccountManager {
       return next;
     }
 
-    if (strategy === 'hybrid') {
-      const freshAccounts = this.getFreshAccountsForQuota(quotaKey, family, model);
-      if (freshAccounts.length > 0) {
-        const fresh = freshAccounts[0];
-        if (fresh) {
-          fresh.lastUsed = nowMs();
-          this.markTouchedForQuota(fresh, quotaKey);
-          this.currentAccountIndexByFamily[family] = fresh.index;
-          return fresh;
+    if (strategy === 'priority-queue') {
+      const healthTracker = getHealthTracker();
+      const tokenTracker = getTokenTracker();
+      
+      const accountsWithMetrics: AccountWithMetrics[] = this.accounts.map(acc => {
+        clearExpiredRateLimits(acc);
+        return {
+          index: acc.index,
+          lastUsed: acc.lastUsed,
+          healthScore: healthTracker.getScore(acc.index),
+          isRateLimited: isRateLimitedForFamily(acc, family, model),
+          isCoolingDown: this.isAccountCoolingDown(acc),
+        };
+      });
+
+      const selectedIndex = selectPriorityQueueAccount(accountsWithMetrics, tokenTracker);
+      if (selectedIndex !== null) {
+        const selected = this.accounts[selectedIndex];
+        if (selected) {
+          // Token consumption is deferred to request execution in plugin.ts
+          selected.lastUsed = nowMs();
+          this.markTouchedForQuota(selected, quotaKey);
+          this.currentAccountIndexByFamily[family] = selected.index;
+          return selected;
         }
       }
     }
 
+    if (strategy === 'hybrid') {
+      const healthTracker = getHealthTracker();
+      const accountsWithMetrics: AccountWithMetrics[] = this.accounts.map(acc => {
+        clearExpiredRateLimits(acc);
+        return {
+          index: acc.index,
+          lastUsed: acc.lastUsed,
+          healthScore: healthTracker.getScore(acc.index),
+          isRateLimited: isRateLimitedForFamily(acc, family, model),
+          isCoolingDown: this.isAccountCoolingDown(acc),
+        };
+      });
+      
+      const sorted = sortByLruWithHealth(accountsWithMetrics);
+      if (sorted.length > 0 && sorted[0]) {
+        const selectedIndex = sorted[0].index;
+        const selected = this.accounts[selectedIndex];
+        if (selected) {
+          selected.lastUsed = nowMs();
+          this.markTouchedForQuota(selected, quotaKey);
+          this.currentAccountIndexByFamily[family] = selected.index;
+          return selected;
+        }
+      }
+    }
+
+    // Fallback: sticky selection (used when priority-queue/hybrid find no candidates)
     // PID-based offset for multi-session distribution (opt-in)
     // Different sessions (PIDs) will prefer different starting accounts
     if (pidOffsetEnabled && !this.sessionOffsetApplied[family] && this.accounts.length > 1) {
@@ -308,14 +434,15 @@ export class AccountManager {
     const current = this.getCurrentAccountForFamily(family);
     if (current) {
       clearExpiredRateLimits(current);
-      if (!isRateLimitedForFamily(current, family, model) && !this.isAccountCoolingDown(current)) {
+      const isLimitedForRequestedStyle = isRateLimitedForHeaderStyle(current, family, headerStyle, model);
+      if (!isLimitedForRequestedStyle && !this.isAccountCoolingDown(current)) {
         current.lastUsed = nowMs();
         this.markTouchedForQuota(current, quotaKey);
         return current;
       }
     }
 
-    const next = this.getNextForFamily(family, model);
+    const next = this.getNextForFamily(family, model, headerStyle);
     if (next) {
       this.markTouchedForQuota(next, quotaKey);
       this.currentAccountIndexByFamily[family] = next.index;
@@ -323,10 +450,10 @@ export class AccountManager {
     return next;
   }
 
-  getNextForFamily(family: ModelFamily, model?: string | null): ManagedAccount | null {
+  getNextForFamily(family: ModelFamily, model?: string | null, headerStyle: HeaderStyle = "antigravity"): ManagedAccount | null {
     const available = this.accounts.filter((a) => {
       clearExpiredRateLimits(a);
-      return !isRateLimitedForFamily(a, family, model) && !this.isAccountCoolingDown(a);
+      return !isRateLimitedForHeaderStyle(a, family, headerStyle, model) && !this.isAccountCoolingDown(a);
     });
 
     if (available.length === 0) {
@@ -352,6 +479,49 @@ export class AccountManager {
   ): void {
     const key = getQuotaKey(family, headerStyle, model);
     account.rateLimitResetTimes[key] = nowMs() + retryAfterMs;
+  }
+
+  markRateLimitedWithReason(
+    account: ManagedAccount,
+    family: ModelFamily,
+    headerStyle: HeaderStyle,
+    model: string | null | undefined,
+    reason: RateLimitReason,
+    retryAfterMs?: number | null
+  ): number {
+    const failures = (account.consecutiveFailures ?? 0) + 1;
+    account.consecutiveFailures = failures;
+    
+    const backoffMs = calculateBackoffMs(reason, failures - 1, retryAfterMs);
+    const key = getQuotaKey(family, headerStyle, model);
+    account.rateLimitResetTimes[key] = nowMs() + backoffMs;
+    
+    return backoffMs;
+  }
+
+  markRequestSuccess(account: ManagedAccount): void {
+    if (account.consecutiveFailures) {
+      account.consecutiveFailures = 0;
+    }
+  }
+
+  clearAllRateLimitsForFamily(family: ModelFamily, model?: string | null): void {
+    for (const account of this.accounts) {
+      if (family === "claude") {
+        delete account.rateLimitResetTimes.claude;
+      } else {
+        const antigravityKey = getQuotaKey(family, "antigravity", model);
+        const cliKey = getQuotaKey(family, "gemini-cli", model);
+        delete account.rateLimitResetTimes[antigravityKey];
+        delete account.rateLimitResetTimes[cliKey];
+      }
+      account.consecutiveFailures = 0;
+    }
+  }
+
+  shouldTryOptimisticReset(family: ModelFamily, model?: string | null): boolean {
+    const minWaitMs = this.getMinWaitTimeForFamily(family, model);
+    return minWaitMs > 0 && minWaitMs <= 2_000;
   }
 
   markAccountCoolingDown(account: ManagedAccount, cooldownMs: number, reason: CooldownReason): void {
@@ -462,7 +632,12 @@ export class AccountManager {
 
   updateFromAuth(account: ManagedAccount, auth: OAuthAuthDetails): void {
     const parts = parseRefreshParts(auth.refresh);
-    account.parts = parts;
+    // Preserve existing projectId/managedProjectId if not in the new parts
+    account.parts = {
+      ...parts,
+      projectId: parts.projectId ?? account.parts.projectId,
+      managedProjectId: parts.managedProjectId ?? account.parts.managedProjectId,
+    };
     account.access = auth.access;
     account.expires = auth.expires;
   }
@@ -539,5 +714,41 @@ export class AccountManager {
     };
 
     await saveAccounts(storage);
+  }
+
+  requestSaveToDisk(): void {
+    if (this.savePending) {
+      return;
+    }
+    this.savePending = true;
+    this.saveTimeout = setTimeout(() => {
+      void this.executeSave();
+    }, 1000);
+  }
+
+  async flushSaveToDisk(): Promise<void> {
+    if (!this.savePending) {
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      this.savePromiseResolvers.push(resolve);
+    });
+  }
+
+  private async executeSave(): Promise<void> {
+    this.savePending = false;
+    this.saveTimeout = null;
+    
+    try {
+      await this.saveToDisk();
+    } catch {
+      // best-effort persistence; avoid unhandled rejection from timer-driven saves
+    } finally {
+      const resolvers = this.savePromiseResolvers;
+      this.savePromiseResolvers = [];
+      for (const resolve of resolvers) {
+        resolve();
+      }
+    }
   }
 }

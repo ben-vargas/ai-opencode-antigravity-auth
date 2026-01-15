@@ -342,9 +342,19 @@ describe("regression tests", () => {
 
       await storageModule.saveAccounts(storage);
 
-      const writtenContent = vi.mocked(fs.writeFile).mock.calls[0]?.[1];
-      const parsed = JSON.parse(writtenContent as string);
+      expect(fs.writeFile).toHaveBeenCalledTimes(2);
+
+      const tmpWriteCall = vi.mocked(fs.writeFile).mock.calls.find(
+        (call) => (call[0] as string).includes(".tmp")
+      );
+      expect(tmpWriteCall).toBeDefined();
+      const parsed = JSON.parse(tmpWriteCall![1] as string);
       expect(parsed.accounts).toHaveLength(3);
+
+      const gitignoreWriteCall = vi.mocked(fs.writeFile).mock.calls.find(
+        (call) => (call[0] as string).includes(".gitignore")
+      );
+      expect(gitignoreWriteCall).toBeDefined();
     });
   });
 });
@@ -352,8 +362,7 @@ describe("regression tests", () => {
 /**
  * Proposed fix validation tests
  * 
- * These tests validate the expected behavior AFTER the fix is implemented.
- * They should FAIL with current code and PASS after the fix.
+ * These tests validate enhanced error handling behavior.
  */
 describe("proposed fix validation", () => {
   describe("loadAccounts should distinguish error types", () => {

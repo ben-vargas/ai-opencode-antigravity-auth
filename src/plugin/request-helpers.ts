@@ -4,6 +4,7 @@ import {
   EMPTY_SCHEMA_PLACEHOLDER_NAME,
   EMPTY_SCHEMA_PLACEHOLDER_DESCRIPTION,
 } from "../constants";
+import { processImageData } from "./image-saver";
 
 const log = createLogger("request-helpers");
 
@@ -1357,6 +1358,17 @@ function transformGeminiCandidate(candidate: any): any {
           args: parsedArgs,
         },
       };
+    }
+
+    // Handle image data (inlineData) - save to disk and return file path
+    if (part.inlineData) {
+      const result = processImageData({
+        mimeType: part.inlineData.mimeType,
+        data: part.inlineData.data,
+      });
+      if (result) {
+        return { text: result };
+      }
     }
 
     return part;

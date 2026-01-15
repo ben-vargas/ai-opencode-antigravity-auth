@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveModelWithTier, resolveModelWithVariant } from "./model-resolver";
+import { resolveModelWithTier, resolveModelWithVariant, resolveModelForHeaderStyle } from "./model-resolver";
 
 describe("resolveModelWithTier", () => {
   describe("Gemini 3 flash models (Issue #109)", () => {
@@ -156,6 +156,50 @@ describe("resolveModelWithVariant", () => {
       });
       expect(result.thinkingBudget).toBe(50000);
       expect(result.configSource).toBe("variant");
+    });
+  });
+});
+
+describe("Issue #103: resolveModelForHeaderStyle", () => {
+  describe("quota fallback from gemini-cli to antigravity", () => {
+    it("transforms gemini-3-flash-preview to gemini-3-flash for antigravity", () => {
+      const result = resolveModelForHeaderStyle("gemini-3-flash-preview", "antigravity");
+      expect(result.actualModel).toBe("gemini-3-flash");
+      expect(result.quotaPreference).toBe("antigravity");
+    });
+
+    it("transforms gemini-3-pro-preview to gemini-3-pro-low for antigravity", () => {
+      const result = resolveModelForHeaderStyle("gemini-3-pro-preview", "antigravity");
+      expect(result.actualModel).toBe("gemini-3-pro-low");
+      expect(result.quotaPreference).toBe("antigravity");
+    });
+  });
+
+  describe("quota fallback from antigravity to gemini-cli", () => {
+    it("transforms gemini-3-flash to gemini-3-flash-preview for gemini-cli", () => {
+      const result = resolveModelForHeaderStyle("gemini-3-flash", "gemini-cli");
+      expect(result.actualModel).toBe("gemini-3-flash-preview");
+      expect(result.quotaPreference).toBe("gemini-cli");
+    });
+
+    it("transforms gemini-3-pro-low to gemini-3-pro-preview for gemini-cli", () => {
+      const result = resolveModelForHeaderStyle("gemini-3-pro-low", "gemini-cli");
+      expect(result.actualModel).toBe("gemini-3-pro-preview");
+      expect(result.quotaPreference).toBe("gemini-cli");
+    });
+  });
+
+  describe("no transformation needed", () => {
+    it("keeps gemini-2.5-flash unchanged for both header styles", () => {
+      const antigravity = resolveModelForHeaderStyle("gemini-2.5-flash", "antigravity");
+      const cli = resolveModelForHeaderStyle("gemini-2.5-flash", "gemini-cli");
+      expect(antigravity.actualModel).toBe("gemini-2.5-flash");
+      expect(cli.actualModel).toBe("gemini-2.5-flash");
+    });
+
+    it("keeps claude models unchanged (antigravity only)", () => {
+      const result = resolveModelForHeaderStyle("claude-sonnet-4-5-thinking", "antigravity");
+      expect(result.actualModel).toBe("claude-sonnet-4-5-thinking");
     });
   });
 });

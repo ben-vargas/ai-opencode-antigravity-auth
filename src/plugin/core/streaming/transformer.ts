@@ -4,6 +4,7 @@ import type {
   StreamingOptions,
   ThoughtBuffer,
 } from './types';
+import { processImageData } from '../../image-saver';
 
 /**
  * Simple string hash for thinking deduplication.
@@ -73,6 +74,19 @@ export function deduplicateThinkingText(
 
       const newParts = content.parts.map((part: unknown) => {
         const p = part as Record<string, unknown>;
+        
+        // Handle image data - save to disk and return file path
+        if (p.inlineData) {
+          const inlineData = p.inlineData as Record<string, unknown>;
+          const result = processImageData({
+            mimeType: inlineData.mimeType as string | undefined,
+            data: inlineData.data as string | undefined,
+          });
+          if (result) {
+            return { text: result };
+          }
+        }
+        
         if (p.thought === true || p.type === 'thinking') {
           const fullText = (p.text || p.thinking || '') as string;
           
