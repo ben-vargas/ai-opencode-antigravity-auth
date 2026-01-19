@@ -903,8 +903,15 @@ export const createAntigravityPlugin = (providerId: string) => async (
             );
             
             if (!account) {
+              const headerStyle = getHeaderStyleFromUrl(urlString, family);
+              const explicitQuota = isExplicitQuotaFromUrl(urlString);
               // All accounts are rate-limited - wait and retry
-              const waitMs = accountManager.getMinWaitTimeForFamily(family, model) || 60_000;
+              const waitMs = accountManager.getMinWaitTimeForFamily(
+                family,
+                model,
+                headerStyle,
+                explicitQuota,
+              ) || 60_000;
               const waitSecValue = Math.max(1, Math.ceil(waitMs / 1000));
 
               pushDebug(`all-rate-limited family=${family} accounts=${accountCount} waitMs=${waitMs}`);
