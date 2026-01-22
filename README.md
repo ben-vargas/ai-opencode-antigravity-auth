@@ -20,6 +20,27 @@ Enable Opencode to authenticate against **Antigravity** (Google's IDE) via OAuth
 
 ---
 
+<details open>
+<summary><b>⚠️ Terms of Service Warning — Read Before Installing</b></summary>
+
+> [!CAUTION]
+> Using this plugin may violate Google's Terms of Service. A small number of users have reported their Google accounts being **banned** or **shadow-banned** (restricted access without explicit notification).
+>
+> **High-risk scenarios:**
+> - 🚨 **Fresh Google accounts** have a very high chance of getting banned
+> - 🚨 **New accounts with Pro/Ultra subscriptions** are frequently flagged and banned
+>
+> **By using this plugin, you acknowledge:**
+> - This is an unofficial tool not endorsed by Google
+> - Your account may be suspended or permanently banned
+> - You assume all risks associated with using this plugin
+>
+> **Recommendation:** Use an established Google account that you don't rely on for critical services. Avoid creating new accounts specifically for this plugin.
+
+</details>
+
+---
+
 ## Installation
 
 <details open>
