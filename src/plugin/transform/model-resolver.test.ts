@@ -76,6 +76,11 @@ describe("resolveModelWithTier", () => {
       expect(result.quotaPreference).toBe("antigravity");
       expect(result.explicitQuota).toBe(true);
     });
+
+    it("defaults to antigravity when cli_first is false", () => {
+      const result = resolveModelWithTier("gemini-3-flash", { cli_first: false });
+      expect(result.quotaPreference).toBe("antigravity");
+    });
   });
 
   describe("Antigravity Gemini 3 with tier suffix", () => {
