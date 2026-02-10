@@ -49,6 +49,7 @@ import { initDiskSignatureCache } from "./plugin/cache";
 import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./plugin/refresh-queue";
 import { initLogger, createLogger } from "./plugin/logger";
 import { initHealthTracker, getHealthTracker, initTokenTracker, getTokenTracker } from "./plugin/rotation";
+import { initAntigravityVersion } from "./plugin/version";
 import { executeSearch } from "./plugin/search";
 import type {
   GetAuth,
@@ -1224,6 +1225,9 @@ export const createAntigravityPlugin = (providerId: string) => async (
   
   // Initialize structured logger for TUI integration
   initLogger(client);
+  
+  // Fetch latest Antigravity version from remote API (non-blocking, falls back to hardcoded)
+  await initAntigravityVersion();
   
   // Initialize health tracker for hybrid strategy
   if (config.health_score) {

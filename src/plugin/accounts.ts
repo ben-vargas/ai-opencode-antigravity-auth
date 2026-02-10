@@ -7,7 +7,7 @@ import { generateFingerprint, type Fingerprint, type FingerprintVersion, MAX_FIN
 import type { QuotaGroup, QuotaGroupSummary } from "./quota";
 import { getModelFamily } from "./transform/model-resolver";
 import { debugLogToFile } from "./debug";
-import { ANTIGRAVITY_VERSION } from "../constants";
+import { getAntigravityVersion } from "../constants";
 
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
 export type { AccountSelectionStrategy } from "./config/schema";
@@ -20,7 +20,7 @@ function updateFingerprintVersion(fingerprint: Fingerprint): Fingerprint {
   const match = fingerprint.userAgent.match(/^antigravity\/[\d.]+ (.+)$/);
   if (match) {
     const platformArch = match[1];
-    const expectedUserAgent = `antigravity/${ANTIGRAVITY_VERSION} ${platformArch}`;
+    const expectedUserAgent = `antigravity/${getAntigravityVersion()} ${platformArch}`;
     if (fingerprint.userAgent !== expectedUserAgent) {
       return { ...fingerprint, userAgent: expectedUserAgent };
     }

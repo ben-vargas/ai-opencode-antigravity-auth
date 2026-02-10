@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import {
-  ANTIGRAVITY_HEADERS,
   GEMINI_CLI_HEADERS,
   ANTIGRAVITY_ENDPOINT,
   GEMINI_CLI_ENDPOINT,

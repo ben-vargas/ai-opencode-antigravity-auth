@@ -10,7 +10,7 @@
 
 import * as crypto from "node:crypto";
 import * as os from "node:os";
-import { ANTIGRAVITY_VERSION } from "../constants";
+import { getAntigravityVersion } from "../constants";
 
 const OS_VERSIONS: Record<string, string[]> = {
   darwin: ["10.15.7", "11.6.8", "12.6.3", "13.5.2", "14.2.1", "14.5"],
@@ -117,7 +117,7 @@ export function generateFingerprint(): Fingerprint {
   return {
     deviceId: generateDeviceId(),
     sessionToken: generateSessionToken(),
-    userAgent: `antigravity/${ANTIGRAVITY_VERSION} ${platform}/${arch}`,
+    userAgent: `antigravity/${getAntigravityVersion()} ${platform}/${arch}`,
     apiClient: randomFrom(SDK_CLIENTS),
     clientMetadata: {
       ideType: randomFrom(IDE_TYPES),
@@ -153,7 +153,7 @@ export function collectCurrentFingerprint(): Fingerprint {
   return {
     deviceId: generateDeviceId(),
     sessionToken: generateSessionToken(),
-    userAgent: `antigravity/${ANTIGRAVITY_VERSION} ${platform}/${arch}`,
+    userAgent: `antigravity/${getAntigravityVersion()} ${platform}/${arch}`,
     apiClient: "google-cloud-sdk vscode_cloudshelleditor/0.1",
     clientMetadata: {
       ideType: "VSCODE",
