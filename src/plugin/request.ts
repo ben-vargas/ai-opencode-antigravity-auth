@@ -655,6 +655,11 @@ export function prepareAntigravityRequest(
 
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.delete("x-api-key");
+  // Strip x-goog-user-project header to prevent 403 PERMISSION_DENIED errors.
+  // This header is added by OpenCode/AI SDK but causes auth conflicts on ALL endpoints
+  // (Daily, Autopush, Prod) when the user's GCP project doesn't have Cloud Code API enabled.
+  // Error: "Cloud Code Private API has not been used in project {user_project} before or it is disabled"
+  headers.delete("x-goog-user-project");
 
   const match = input.match(/\/models\/([^:]+):(\w+)/);
   if (!match) {
