@@ -135,7 +135,6 @@ async function fetchProjectID(accessToken: string): Promise<string> {
     Authorization: `Bearer ${accessToken}`,
     "Content-Type": "application/json",
     "User-Agent": GEMINI_CLI_HEADERS["User-Agent"],
-    "X-Goog-Api-Client": GEMINI_CLI_HEADERS["X-Goog-Api-Client"],
     "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
   };
 
@@ -214,7 +213,6 @@ export async function exchangeAntigravity(
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
         "User-Agent": GEMINI_CLI_HEADERS["User-Agent"],
-        "X-Goog-Api-Client": GEMINI_CLI_HEADERS["X-Goog-Api-Client"],
       },
       body: new URLSearchParams({
         client_id: ANTIGRAVITY_CLIENT_ID,
@@ -239,7 +237,6 @@ export async function exchangeAntigravity(
         headers: {
           Authorization: `Bearer ${tokenPayload.access_token}`,
           "User-Agent": GEMINI_CLI_HEADERS["User-Agent"],
-          "X-Goog-Api-Client": GEMINI_CLI_HEADERS["X-Goog-Api-Client"],
         },
       },
     );

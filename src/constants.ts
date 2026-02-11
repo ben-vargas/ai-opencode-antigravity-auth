@@ -105,9 +105,7 @@ export const ANTIGRAVITY_HEADERS = {
 } as const;
 
 export const GEMINI_CLI_HEADERS = {
-  "User-Agent": "google-api-nodejs-client/10.3.0",
-  "X-Goog-Api-Client": "gl-node/22.18.0",
-  "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+  "User-Agent": "GeminiCLI/1.0.0/gemini-2.5-flash",
 } as const;
 
 const ANTIGRAVITY_PLATFORMS = ["windows/amd64", "darwin/arm64", "linux/amd64", "darwin/amd64", "linux/arm64"] as const;
@@ -123,16 +121,9 @@ const ANTIGRAVITY_API_CLIENTS = [
 ] as const;
 
 const GEMINI_CLI_USER_AGENTS = [
-  "google-api-nodejs-client/9.15.1",
-  "google-api-nodejs-client/9.14.0",
-  "google-api-nodejs-client/9.13.0",
-] as const;
-
-const GEMINI_CLI_API_CLIENTS = [
-  "gl-node/22.17.0",
-  "gl-node/22.12.0",
-  "gl-node/20.18.0",
-  "gl-node/21.7.0",
+  "GeminiCLI/1.2.0/gemini-2.5-flash",
+  "GeminiCLI/1.1.0/gemini-2.5-flash",
+  "GeminiCLI/1.0.0/gemini-2.5-flash",
 ] as const;
 
 function randomFrom<T>(arr: readonly T[]): T {
@@ -141,16 +132,14 @@ function randomFrom<T>(arr: readonly T[]): T {
 
 export type HeaderSet = {
   "User-Agent": string;
-  "X-Goog-Api-Client": string;
-  "Client-Metadata": string;
+  "X-Goog-Api-Client"?: string;
+  "Client-Metadata"?: string;
 };
 
 export function getRandomizedHeaders(style: HeaderStyle): HeaderSet {
   if (style === "gemini-cli") {
     return {
       "User-Agent": randomFrom(GEMINI_CLI_USER_AGENTS),
-      "X-Goog-Api-Client": randomFrom(GEMINI_CLI_API_CLIENTS),
-      "Client-Metadata": GEMINI_CLI_HEADERS["Client-Metadata"],
     };
   }
   return {

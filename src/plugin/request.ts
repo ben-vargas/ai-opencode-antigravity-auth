@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import {
-  GEMINI_CLI_HEADERS,
   ANTIGRAVITY_ENDPOINT,
   GEMINI_CLI_ENDPOINT,
   EMPTY_SCHEMA_PLACEHOLDER_NAME,
@@ -1400,8 +1399,6 @@ export function prepareAntigravityRequest(
     // NO fingerprint headers, NO X-Goog-QuotaUser, NO X-Client-Device-Id
     // This mirrors exactly what https://github.com/jenslys/opencode-gemini-auth does
     headers.set("User-Agent", selectedHeaders["User-Agent"]);
-    headers.set("X-Goog-Api-Client", selectedHeaders["X-Goog-Api-Client"]);
-    headers.set("Client-Metadata", selectedHeaders["Client-Metadata"]);
   }
   // Optional debug header to observe tool normalization on the backend if surfaced
   if (toolDebugMissing > 0) {
