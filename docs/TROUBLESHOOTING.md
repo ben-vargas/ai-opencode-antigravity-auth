@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common issues and solutions for the Antigravity Auth plugin.
+Solutions to common issues with the Antigravity Auth plugin.
 
 > **Quick Reset**: Most issues can be resolved by deleting `~/.config/opencode/antigravity-accounts.json` and running `opencode auth login` again.
 
