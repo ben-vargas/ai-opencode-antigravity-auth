@@ -8,7 +8,7 @@ Create `~/.config/opencode/antigravity.json` (or `.opencode/antigravity.json` in
 }
 ```
 
-Most settings have sensible defaults. Only configure what you need.
+Most settings have sensible defaults — only configure what you need.
 
 ---
 
