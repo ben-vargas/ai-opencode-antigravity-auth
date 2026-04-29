@@ -85,7 +85,7 @@ Settings for managing multiple Google accounts.
 
 ## App Behavior
 
-Settings for plugin behavior.
+Settings that control plugin behavior.
 
 | Option | Default | Description |
 |--------|---------|-------------|
