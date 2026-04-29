@@ -242,7 +242,7 @@ Add this to your `~/.config/opencode/opencode.json`:
 
 ## Multi-Account Setup
 
-Add multiple Google accounts for higher combined quotas. The plugin automatically rotates between accounts when one is rate-limited.
+Add multiple Google accounts for a higher combined quota. The plugin automatically rotates between accounts when one is rate-limited.
 
 ```bash
 opencode auth login  # Run again to add more accounts
